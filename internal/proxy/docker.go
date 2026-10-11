@@ -89,9 +89,48 @@ func (e *Engine) serveDocker(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requestRegistryHost 返回本次 /v2/ 请求针对的注册表域名（去端口）。
+// daemon 经 registry-mirrors 转发时 Host 头即注册表域名；
+// 绝对 URL 代理形态下注册表在 r.URL.Host。
+func (e *Engine) requestRegistryHost(r *http.Request) string {
+	host := r.Host
+	if r.URL.IsAbs() && r.URL.Host != "" {
+		host = r.URL.Host
+	}
+	return stripPort(host)
+}
+
+// isDockerHubRegistry 判断注册表是否属于 Docker Hub（daemon 的
+// registry-mirrors 官方语义只覆盖 Docker Hub，社区镜像也都只镜像它）。
+func isDockerHubRegistry(host string) bool {
+	return host == "docker.io" || strings.HasSuffix(host, ".docker.io")
+}
+
+// dockerUpstreamsForRegistry 返回指定注册表的转发链。
+//
+// 非 Docker Hub 注册表（ghcr.io / gcr.io / quay.io / registry.k8s.io 等）：
+// dockerhub 社区镜像不持有这些注册表的内容，只会回 401 质询——daemon 跟着
+// 质询走 token 流拿到的是一句没有上下文的 "denied"；且 401 质询透传语义
+// （done=true）会掐断 failover 链，使真正能服务的上游（内置引擎，多注册表
+// profile，ghcr 已实测可服务）永远轮不上。
+// 这类请求只保留：内置引擎（若在位）+ 该注册表官方直连兜底。
+func (e *Engine) dockerUpstreamsForRegistry(cfg *config.Config, regHost string) []string {
+	if regHost == "" || isDockerHubRegistry(regHost) {
+		return e.dockerUpstreams(cfg)
+	}
+	var kept []string
+	if e.dockerExtra != nil {
+		if extra := e.dockerExtra(); extra != "" {
+			kept = append(kept, extra)
+		}
+	}
+	kept = append(kept, "https://"+regHost)
+	return kept
+}
+
 // serveDockerRegistry 把 /v2/ 请求转发给按序尝试的上游。
 func (e *Engine) serveDockerRegistry(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
-	upstreams := e.dockerUpstreams(cfg)
+	upstreams := e.dockerUpstreamsForRegistry(cfg, e.requestRegistryHost(r))
 
 	var lastErr error
 	for _, up := range upstreams {

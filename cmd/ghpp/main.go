@@ -62,14 +62,6 @@ func main() {
 		return
 	}
 
-	// 启动早期写自身 PID 到 GHPH_PID_FILE 指定路径，供 fpk/cmd/main 的
-	// stop/status 管理。这是 setsid 启动方式下唯一可靠的取 PID 方式
-	// （setsid 后 $! 拿到的是 setsid 而非真实服务进程）。
-	// 仅在主服务模式下写入；reset-password / clear-hosts 等子命令不写。
-	if v := os.Getenv("GHPH_PID_FILE"); v != "" && !*resetPass && !*clearHost && !*clearSystemCA {
-		_ = os.WriteFile(v, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
-	}
-
 	// 解析数据目录。
 	dir := config.ResolveDataDir(*dataDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -156,6 +148,15 @@ func main() {
 	if err := application.Start(); err != nil {
 		log.Logf("error", "启动失败: %v", err)
 		os.Exit(1)
+	}
+
+	// 代理监听成功之后才写自身 PID 到 GHPH_PID_FILE 指定路径，供 fpk/cmd/main
+	// 的 stop/status 管理。这是 setsid 启动方式下唯一可靠的取 PID 方式
+	// （setsid 后 $! 拿到的是 setsid 而非真实服务进程）。
+	// 绑定失败即退出的实例（如端口已被重复实例占用）不留 pidfile：
+	// 否则会覆盖健康实例写入的 pidfile，让 stop/status 跟着死 pid 走。
+	if v := os.Getenv("GHPH_PID_FILE"); v != "" {
+		_ = os.WriteFile(v, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
 	}
 
 	// 控制台服务。

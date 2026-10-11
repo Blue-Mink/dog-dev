@@ -62,3 +62,7 @@ regress_*.sh
 reinstall_*.sh
 verify_400.sh
 xget_e2e.sh
+release_126.py
+release-1.2.6-notes.md
+install_127_a.sh
+app.tgz

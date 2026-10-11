@@ -98,6 +98,14 @@ while true; do
         echo "$(date '+%Y-%m-%d %H:%M:%S') - 进程异常退出 rc=${rc}，已不重启（stop 或开关关闭），看门狗结束" >> "${LOG_FILE}"
         break
     fi
+    # 若还有别的存活 ghpp 实例（另一条进程树）：说明本树是重复启动的产物，
+    # 端口被对方占用，本树永远绑不上——循环重启只会反复覆盖 app.pid、
+    # 刷爆日志，还可能被平台误判。此时本看门狗放弃，由存活实例接管服务。
+    other=$(pgrep -f "${BIN} -data" 2>/dev/null | head -n 1)
+    if [ -n "${other}" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - 检测到另一存活 ghpp 实例（pid ${other}），本看门狗放弃重启并退出" >> "${LOG_FILE}"
+        break
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') - 进程异常退出 rc=${rc}，3 秒后自动重启" >> "${LOG_FILE}"
     sleep 3
 done
