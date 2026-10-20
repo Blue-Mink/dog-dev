@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,14 +40,18 @@ var (
 
 func main() {
 	var (
-		dataDir   = flag.String("data", "", "数据目录，默认为飞牛应用数据目录或 ~/.ghpp")
-		proxyAddr = flag.String("proxy", "", "覆盖代理监听地址，例如 0.0.0.0:37710")
-		webAddr   = flag.String("web", "", "覆盖控制台监听地址，例如 0.0.0.0:37717")
+		dataDir       = flag.String("data", "", "数据目录，默认为飞牛应用数据目录或 ~/.ghpp")
+		proxyAddr     = flag.String("proxy", "", "覆盖代理监听地址，例如 0.0.0.0:37710")
+		webAddr       = flag.String("web", "", "覆盖控制台监听地址，例如 0.0.0.0:37717")
 		showVer       = flag.Bool("version", false, "打印版本信息后退出")
 		resetPass     = flag.Bool("reset-password", false, "重置控制台密码后退出")
 		clearHost     = flag.Bool("clear-hosts", false, "清理系统 hosts 中的加速托管区后退出，供卸载时调用")
 		clearSystemCA = flag.Bool("clear-system-ca", false, "从系统信任移除本地 CA 后退出，供卸载时调用")
+		ensureSystemCA = flag.Bool("ensure-system-ca", false, "系统代理开启时确保本地 CA 已装入系统信任，供安装/升级回调调用")
 		noWeb         = flag.Bool("no-web", false, "仅运行代理，不启动控制台")
+		gatewaySocket = flag.String("gateway-socket", "", "飞牛统一网关 unix socket 路径（平台经此转发桌面入口）")
+		gatewayPrefix = flag.String("gateway-prefix", "/app/dog-dev", "飞牛统一网关访问前缀")
+		setPorts      = flag.String("set-ports", "", "仅写入监听端口后退出，格式 proxy=37710,web=37717（供安装向导调用）")
 	)
 	flag.Parse()
 
@@ -69,6 +75,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 安装/升级回调补装 CA：系统代理已开启（重装保留的 config）但系统信任里的
+	// CA 被卸载流程清掉时，这里补装，避免新 shell 的 GitHub HTTPS 降级成纯隧道
+	// 直连超时。失败仅打印告警、不阻断安装（应用启动后仍可用，HTTPS 走隧道兜底）。
+	if *ensureSystemCA {
+		if err := app.EnsureSystemCA(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "补装系统 CA 失败: %v\n", err)
+		}
+		return
+	}
+
 	// 初始化日志总线：内存保留 2000 条，同时落盘到数据目录。
 	// 按大小轮转（5MB 触发，保留 3 份历史），避免日志无限增长。
 	logPath := ""
@@ -87,10 +103,20 @@ func main() {
 
 	// 同步看门狗自动重启开关到标记文件，供 fpk/cmd/main 的 run_with_watchdog 读取。
 	// 跳过 reset-password / clear-hosts 等子命令，避免无谓写盘。
-	if !*resetPass && !*clearHost {
+	if !*resetPass && !*clearHost && *setPorts == "" {
 		if err := config.SyncWatchdogFlag(dir, cfg.Watchdog.AutoRestart); err != nil {
 			log.Logf("warn", "写看门狗标记文件失败: %v", err)
 		}
+	}
+
+	// 安装向导落端口：装机回调在首次启动前调用，把用户填的端口写进配置后退出。
+	if *setPorts != "" {
+		if err := applyPorts(cfg, *setPorts); err != nil {
+			fmt.Fprintf(os.Stderr, "写入端口失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("已写入监听端口：代理 %s，控制台 %s\n", cfg.Proxy.Listen, cfg.Server.Listen)
+		return
 	}
 
 	// 命令行参数覆盖配置。
@@ -169,6 +195,10 @@ func main() {
 				log.Logf("error", "控制台服务退出: %v", err)
 			}
 		}()
+		// 飞牛统一网关入口（桌面图标走这里，与控制台端口解耦）。
+		if err := server.StartGateway(*gatewaySocket, *gatewayPrefix); err != nil {
+			log.Logf("warn", "统一网关入口不可用（不影响直连端口访问）: %v", err)
+		}
 	}
 
 	// 等待退出信号。
@@ -270,4 +300,49 @@ func detectLANIP() string {
 		return ip
 	}
 	return ""
+}
+
+// applyPorts 把安装向导填写的端口写进配置（仅供 -set-ports 使用）。
+//
+// 规格串形如 proxy=37710,web=37717，任一段可省略（省略则保持现有值）。
+// 只改监听端口，其余配置（加速源、证书、用户设置）原样保留；
+// 已存在的配置文件被升级/重装时也不会因为向导默认值被冲掉。
+func applyPorts(cfg *config.Config, spec string) error {
+	var proxyPort, webPort string
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			return fmt.Errorf("无法解析 %q（应为 名称=端口）", part)
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("端口 %q 不是 1-65535 之间的数字", value)
+		}
+		switch key {
+		case "proxy":
+			proxyPort = value
+		case "web":
+			webPort = value
+		default:
+			return fmt.Errorf("未知端口项 %q（仅支持 proxy / web）", key)
+		}
+	}
+	if proxyPort != "" && proxyPort == webPort {
+		return fmt.Errorf("加速代理端口与控制台端口不能相同（都是 %s）", proxyPort)
+	}
+	return cfg.Update(func(c *config.Config) error {
+		if proxyPort != "" {
+			c.Proxy.Listen = "0.0.0.0:" + proxyPort
+		}
+		if webPort != "" {
+			c.Server.Listen = "0.0.0.0:" + webPort
+		}
+		return nil
+	})
 }

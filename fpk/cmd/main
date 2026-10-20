@@ -130,6 +130,12 @@ start_process() {
 
     # 数据目录使用 TRIM_PKGVAR，升级与重装后配置依然保留。
     #
+    # 统一网关 socket：飞牛平台把 gatewaySocket 解析成
+    # ${TRIM_APPDEST}/target/<文件名>，而 /var/apps/<app>/target 指向
+    # 应用载荷目录，所以这里直接用载荷根目录下的绝对路径，两边是同一个文件。
+    GATEWAY_SOCKET="${TRIM_APPDEST}/dog-dev-gateway.sock"
+    GATEWAY_PREFIX="/app/dog-dev"
+
     # setsid 让看门狗进程脱离控制终端、进程组与 cgroup，进入新会话，
     # 即便启动 shell 所在会话/cgroup 被销毁（关闭桌面窗口/登出飞牛账号），
     # 加速服务也不会被牵连终止。
@@ -138,7 +144,9 @@ start_process() {
     # main 只需等待 Go 进程把自身 PID 写入 PID_FILE 即可确认启动成功。
     # 用 env 显式传环境变量，避免子 shell 拿不到 BIN/TRIM_PKGVAR 等非 export 变量。
     setsid env BIN="${BIN}" TRIM_PKGVAR="${TRIM_PKGVAR}" LOG_FILE="${LOG_FILE}" \
-        GHPH_PID_FILE="${PID_FILE}" bash "${WATCHDOG}" >> "${LOG_FILE}" 2>&1 < /dev/null &
+        GHPH_PID_FILE="${PID_FILE}" \
+        GHPH_GATEWAY_SOCKET="${GATEWAY_SOCKET}" GHPH_GATEWAY_PREFIX="${GATEWAY_PREFIX}" \
+        bash "${WATCHDOG}" >> "${LOG_FILE}" 2>&1 < /dev/null &
 
     # 等待 Go 进程把自身 PID 写入 ${PID_FILE} 且进程存活，才算启动成功。
     # 服务启动要测速与写 hosts，需要几秒；只有确认进程还活着才算启动成功，

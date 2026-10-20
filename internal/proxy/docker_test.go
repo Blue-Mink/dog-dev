@@ -782,3 +782,60 @@ func TestDockerNonHubRegistryServedByEngine(t *testing.T) {
 		t.Fatalf("dockerhub 社区镜像被触碰（应整体跳过）")
 	}
 }
+
+// TestDockerRequestRegistryHostMirror：registry-mirror 形态下 Host 是代理
+// 监听地址（IP 字面量），requestRegistryHost 必须回 docker.io 而非 IP——
+// 否则 127.0.0.1 被误判成非 Docker Hub 注册表，上游链退化成
+// [内置引擎, https://127.0.0.1]，命中飞牛本机 nginx 443 → 302 → 5667
+// 证书校验失败，整次拉取回退官方超时（真机回归，见 DOGDEV-FULLTEST-20261020）。
+func TestDockerRequestRegistryHostMirror(t *testing.T) {
+	cfg := config.Default()
+	cfg.Docker.Enabled = true
+	e := newDockerTestEngine(cfg)
+
+	cases := []struct {
+		name     string
+		req      *http.Request
+		wantHost string
+	}{
+		{
+			name:     "mirror 回环地址按 Docker Hub 处理",
+			req:      newReqHost("/v2/library/alpine/manifests/3.19", "127.0.0.1:37710"),
+			wantHost: "docker.io",
+		},
+		{
+			name:     "mirror LAN IP 也按 Docker Hub 处理",
+			req:      newReqHost("/v2/library/alpine/manifests/3.19", "192.168.1.2:37710"),
+			wantHost: "docker.io",
+		},
+		{
+			name:     "透明反代官方域名保留",
+			req:      newReqHost("/v2/library/alpine/manifests/3.19", "registry-1.docker.io"),
+			wantHost: "registry-1.docker.io",
+		},
+		{
+			name:     "非 Hub 注册表域名保留",
+			req:      newReqHost("/v2/hashicorp/terraform/manifests/1.9.0", "ghcr.io"),
+			wantHost: "ghcr.io",
+		},
+		{
+			name:     "绝对 URL 代理形态取 r.URL.Host",
+			req:      httptest.NewRequest(http.MethodGet, "http://ghcr.io/v2/x/manifests/y", nil),
+			wantHost: "ghcr.io",
+		},
+	}
+
+	for _, tc := range cases {
+		got := e.requestRegistryHost(tc.req)
+		if got != tc.wantHost {
+			t.Errorf("%s: requestRegistryHost=%q, want %q", tc.name, got, tc.wantHost)
+		}
+	}
+}
+
+// newReqHost 构造一个路径形式的 /v2/ 请求并指定 Host 头（模拟 daemon 直连）。
+func newReqHost(path, host string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Host = host
+	return req
+}

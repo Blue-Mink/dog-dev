@@ -90,14 +90,27 @@ func (e *Engine) serveDocker(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestRegistryHost 返回本次 /v2/ 请求针对的注册表域名（去端口）。
-// daemon 经 registry-mirrors 转发时 Host 头即注册表域名；
-// 绝对 URL 代理形态下注册表在 r.URL.Host。
+//
+// 三种来源形态：
+//   - 绝对 URL 代理形态（docker 经 HTTP 代理访问）：注册表在 r.URL.Host；
+//   - 透明反代形态（daemon 直连官方/其他注册表，Host 即注册表域名）；
+//   - registry-mirror 形态（daemon.json 把 mirror 指到本机）：Host 是代理
+//     自身监听地址（IP 字面量 127.0.0.1 / 本机 LAN IP），而 mirror 语义只
+//     覆盖 Docker Hub，故按 docker.io 处理——否则 127.0.0.1 会被误判成非
+//     Docker Hub 注册表，上游链退化成 [内置引擎, https://127.0.0.1]，后者
+//     命中飞牛本机 nginx 443 → 302 → 5667 证书校验失败，拉取回退官方超时。
 func (e *Engine) requestRegistryHost(r *http.Request) string {
-	host := r.Host
+	// 绝对 URL 代理形态：注册表域名在 r.URL.Host（如 ghcr.io）。
 	if r.URL.IsAbs() && r.URL.Host != "" {
-		host = r.URL.Host
+		return stripPort(r.URL.Host)
 	}
-	return stripPort(host)
+	host := stripPort(r.Host)
+	// registry-mirror 形态：Host 是 IP 字面量（代理监听地址），默认 Docker Hub。
+	if net.ParseIP(host) != nil {
+		return "docker.io"
+	}
+	// 透明反代 / 域名直访：Host 即注册表域名。
+	return host
 }
 
 // isDockerHubRegistry 判断注册表是否属于 Docker Hub（daemon 的
@@ -405,7 +418,7 @@ func (e *Engine) tryDockerUpstream(w http.ResponseWriter, r *http.Request, cfg *
 				e.allowDockerRedirectHost(stripPort(tu.Host))
 			}
 			// 改写必须落在 w.Header()（copyResponseHeaders 后已是副本）。
-			w.Header().Set("Location", e.rewriteDockerLocation(loc, e.dockerSelfHost(r)))
+			w.Header().Set("Location", e.rewriteDockerLocation(loc, e.dockerSelfHost(r), upstream))
 		}
 	}
 
@@ -416,6 +429,8 @@ func (e *Engine) tryDockerUpstream(w http.ResponseWriter, r *http.Request, cfg *
 	e.metrics.Accelerated.Add(1)
 
 	latency := time.Since(start)
+	// 真实 blob 下载顺带记录吞吐，供界面"速度"列展示（小请求被内部忽略）。
+	e.dockerPool.RecordSpeed(upstream, n, latency)
 	// 内置引擎是服务端聚合器：首个请求含节点选择与跨节点抓取，
 	// 1~3s 属正常行为。打分用的延迟钳到 1s，避免一次慢请求就把它
 	// 挤出快镜像之后（其 8s 小请求窗口已保证慢请求不被中途掐断）。
@@ -506,6 +521,8 @@ func (e *Engine) serveDockerRedirect(w http.ResponseWriter, r *http.Request, cfg
 	}
 	// SSRF 防护：只允许中转 Docker 官方、已配置上游的地址，
 	// 以及受信任上游 302 实际指过的主机（观察名单，TTL 30 分钟）。
+	// up 是发起该重定向的上游（由 rewriteDockerLocation 写入），用于回填吞吐。
+	up := r.URL.Query().Get("up")
 	if !isDockerCDNHost(stripPort(u.Host), e.dockerUpstreams(cfg)) &&
 		!e.redirectHostAllowed(stripPort(u.Host)) {
 		http.Error(w, "重定向目标不受信任", http.StatusForbidden)
@@ -582,13 +599,17 @@ func (e *Engine) serveDockerRedirect(w http.ResponseWriter, r *http.Request, cfg
 			if tu, err := url.Parse(loc); err == nil && tu.Scheme == "https" {
 				e.allowDockerRedirectHost(stripPort(tu.Host))
 			}
-			w.Header().Set("Location", e.rewriteDockerLocation(loc, e.dockerSelfHost(r)))
+			w.Header().Set("Location", e.rewriteDockerLocation(loc, e.dockerSelfHost(r), up))
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
 	counter := &countingWriter{w: w}
 	n, _ := io.Copy(counter, resp.Body)
 	e.metrics.BytesOut.Add(n)
+	// 真实 blob 经中转下载完成：回填上游吞吐（小请求由 RecordSpeed 内部忽略）。
+	if up != "" {
+		e.dockerPool.RecordSpeed(up, n, time.Since(start))
+	}
 	e.logf("debug", "Docker _redirect %s via %s -> %d (%dms, %d bytes)",
 		r.Method, u.Host, resp.StatusCode, time.Since(start).Milliseconds(), n)
 }
@@ -820,7 +841,7 @@ func (e *Engine) dockerSelfHost(r *http.Request) string {
 //
 // 只改写指向 Docker 相关域名或 302 观察名单主机的绝对地址；其他地址保持
 // 原样，由客户端直接访问（例如镜像站自有的对象存储）。
-func (e *Engine) rewriteDockerLocation(loc, selfHost string) string {
+func (e *Engine) rewriteDockerLocation(loc, selfHost, upstream string) string {
 	if loc == "" || strings.HasPrefix(loc, "/") {
 		return loc
 	}
@@ -835,7 +856,13 @@ func (e *Engine) rewriteDockerLocation(loc, selfHost string) string {
 	if strings.HasPrefix(loc, "http://"+selfHost) || strings.HasPrefix(loc, "https://"+selfHost) {
 		return loc // 已经指向本机
 	}
-	return "http://" + selfHost + "/v2/_redirect?to=" + b64encode(loc)
+	// up 记录这次重定向来自哪面上游：/v2/_redirect 中转结束时用字节数与耗时
+	// 回填该上游的真实吞吐（界面"速度"列）。空值表示未知来源，只中转不记录。
+	out := "http://" + selfHost + "/v2/_redirect?to=" + b64encode(loc)
+	if upstream != "" {
+		out += "&up=" + url.QueryEscape(upstream)
+	}
+	return out
 }
 
 // isDockerAuthHost 判断是否为允许中转的认证地址。
