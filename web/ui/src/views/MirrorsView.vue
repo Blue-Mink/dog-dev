@@ -60,6 +60,13 @@ const visible = computed(() => (allOpen.value ? mirrors.value : mirrors.value.sl
 const summary = computed(() =>
   mirrors.value.filter((m) => m.enabled).length + ' / ' + mirrors.value.length + ' 启用')
 
+/* 非加密 http 加速源：明文传输，链路可被中间人改写（下载内容无签名兜底），
+ * 行内给一个琥珀色感叹号提示，口径与 Moo 应用源「未加密源」警示一致。
+ * 仅提示，不影响启用/测速/下载逻辑。 */
+function isPlainHttp(m) {
+  return /^http:\/\//i.test(String((m && m.url) || ''))
+}
+
 function badge(m) {
   const st = m.stat || {}
   const tested = st.at && new Date(st.at).getFullYear() > 2000
@@ -210,6 +217,10 @@ function del() {
           <div class="lrow-main">
             <div class="lrow-t">
               <span class="name" :title="m.name">{{ m.name }}</span>
+              <svg
+                v-if="isPlainHttp(m)" class="plain-warn" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              ><title>非加密 http 源：下载内容未做传输完整性保护，请核对 sha256</title><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="M12 8v4" /><path d="M12 16h.01" /></svg>
               <span class="badge" :class="badge(m).cls" :title="badge(m).title">{{ badge(m).text }}</span>
             </div>
             <div class="lrow-s" :title="m.url">{{ subline(m) }}</div>
@@ -280,6 +291,7 @@ function del() {
 .mrow { cursor: pointer; }
 .mrow.dim .lrow-t .name { color: var(--fg3); }
 .mrow .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plain-warn { width: 13px; height: 13px; flex: none; color: #f59e0b; }
 .rank {
   flex: none; width: 44px; text-align: center;
   font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 700;

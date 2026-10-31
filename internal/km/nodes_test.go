@@ -199,7 +199,10 @@ func TestInstalledAndVersion(t *testing.T) {
 
 // TestVersionBelow：低版本告警判据。
 func TestVersionBelow(t *testing.T) {
-	cases := []struct{ v, min string; below bool }{
+	cases := []struct {
+		v, min string
+		below  bool
+	}{
 		{"0.8.0", "0.8.2", true},
 		{"0.8.1", "0.8.2", true},
 		{"0.8.2", "0.8.2", false},

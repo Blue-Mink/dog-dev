@@ -66,6 +66,14 @@ type App struct {
 
 	// 最近一次 hosts 刷新时间。
 	lastHostsSync time.Time
+	// 最近一次「托管 IP 健康复检」时间。
+	lastHostsHealth time.Time
+	// 托管区按域名的连续复检失败次数（hosts_health.go）。
+	hostsFail map[string]int
+	// hostsHealing 表示复检正在后台执行，避免叠加。
+	hostsHealing bool
+	// httpCheck 是托管 IP 校验函数，默认走 dnsopt 真实校验，测试可替换。
+	httpCheck func(ctx context.Context, host, ip, path string, timeout time.Duration) bool
 	// 最近一次自动决策时间。
 	lastDecide time.Time
 
@@ -96,12 +104,13 @@ func New(cfg *config.Config, log *logbus.Bus) *App {
 	// kspeeder 依赖应用探测器：检测独立安装的 kspeeder 应用是否
 	// 安装/运行，其 registry 端口活着时作为 Docker 上游第一优先。
 	a := &App{
-		cfg:      cfg,
-		log:      log,
-		pool:     pool,
-		ca:       ca,
-		caErr:    caErr,
-		kspeeder: km.New(cfg.KSpeeder.RegistryURL, cfg.KSpeeder.AdminURL, cfg.KSpeeder.ManifestPath, cfg.KSpeeder.PortConf, log.Logf),
+		cfg:       cfg,
+		log:       log,
+		hostsFail: make(map[string]int, 8),
+		pool:      pool,
+		ca:        ca,
+		caErr:     caErr,
+		kspeeder:  km.New(cfg.KSpeeder.RegistryURL, cfg.KSpeeder.AdminURL, cfg.KSpeeder.ManifestPath, cfg.KSpeeder.PortConf, log.Logf),
 	}
 
 	// 日志总线同时作为各模块的日志出口。
@@ -505,6 +514,7 @@ func (a *App) loop(ctx context.Context) {
 			}
 			a.tickMonitor(ctx)
 			a.tickFullRefresh(ctx)
+			a.tickHostsHealth(ctx)
 		}
 	}
 }
@@ -627,6 +637,21 @@ func (a *App) RefreshAll(ctx context.Context) {
 		a.effectiveWhy = verdict.Reason
 		a.lastDecide = time.Now()
 		a.mu.Unlock()
+		// 决策判定「两条加速通路都不可用」时，把上一轮写进 hosts 的记录清掉：
+		// 否则那几条死 IP 会一直生效，把整机 github.com 打进黑洞
+		// （旧代码只在进程停止或用户手动清理时才 Clear）。
+		// 仅在「加速通路全灭」时清，不因为「直连更快」就清——后者保留托管
+		// 条目是无害的，贸然清掉反而让本来能用的域名失去优选。
+		proxySample, hasProxy := verdict.Samples[decide.PathProxy]
+		hostsSample, hasHosts := verdict.Samples[decide.PathHosts]
+		pathsAllDead := (!hasProxy || !proxySample.OK) && (!hasHosts || !hostsSample.OK)
+		if pathsAllDead && cfg.Hosts.Enabled {
+			if err := a.hostsMgr.Clear(); err != nil {
+				a.log.Logf("warn", "加速通路全灭，清理 hosts 失败: %v", err)
+			} else {
+				a.log.Logf("info", "加速通路全灭，已清理 hosts 托管区（回退系统 DNS）")
+			}
+		}
 	} else {
 		a.mu.Lock()
 		a.effectiveMode = cfg.Mode
@@ -740,13 +765,42 @@ func (a *App) SyncHosts(ctx context.Context) {
 	timeout := time.Duration(cfg.Hosts.ProbeTimeoutMS) * time.Millisecond
 	best := a.optimize.OptimizeAll(ctx, cfg.Hosts.CandidateLimit, timeout)
 
+	paths := make(map[string]string, 5)
+	for _, t := range config.DomainProbeTargets() {
+		paths[t.Host] = t.Path
+	}
+
 	entries := make([]hostsfile.Entry, 0, len(best))
 	for host, candidates := range best {
-		if len(candidates) == 0 || !candidates[0].OK {
+		if len(candidates) == 0 {
 			a.log.Logf("debug", "域名 %s 无可用候选 IP", host)
 			continue
 		}
-		top := candidates[0]
+		// 写盘前对前两个候选做 HTTP 校验：TCP/TLS 握手通过但 HTTP 挂的
+		// 节点不能写进 hosts（2026-10-31 实测：国内入口握手 236ms 通过，
+		// 随后 HTTP 全部超时，写下去等于整机黑洞）。
+		var top dnsopt.Candidate
+		ok := false
+		for i := 0; i < len(candidates) && i < 3; i++ {
+			c := candidates[i]
+			if !c.OK {
+				continue
+			}
+			// 抖动节点常见「一次失败、下一次就通」，每个候选给两次机会。
+			passed := a.optimize.HTTPCheck(ctx, host, c.IP, paths[host], 8*time.Second)
+			if !passed {
+				passed = a.optimize.HTTPCheck(ctx, host, c.IP, paths[host], 8*time.Second)
+			}
+			if passed {
+				top, ok = c, true
+				break
+			}
+			a.log.Logf("debug", "域名 %s 候选 %s 握手可用但 HTTP 校验失败，改试下一个", host, c.IP)
+		}
+		if !ok {
+			a.log.Logf("warn", "域名 %s 无通过 HTTP 校验的候选，跳过写入", host)
+			continue
+		}
 		entries = append(entries, hostsfile.Entry{
 			IP:   top.IP,
 			Host: host,
@@ -755,7 +809,13 @@ func (a *App) SyncHosts(ctx context.Context) {
 	}
 
 	if len(entries) == 0 {
-		a.log.Logf("warn", "DNS 优选未获得可用结果，hosts 保持不变")
+		// 旧行为是「hosts 保持不变」——等于把上一个死 IP 继续钉在系统里，
+		// 直到进程停止才清理。全部候选不可用时应当回退系统 DNS。
+		if err := a.hostsMgr.Clear(); err != nil {
+			a.log.Logf("warn", "DNS 优选无可用结果，清理 hosts 失败: %v", err)
+		} else {
+			a.log.Logf("warn", "DNS 优选无可用结果，已清理 hosts 托管区（回退系统 DNS）")
+		}
 		return
 	}
 

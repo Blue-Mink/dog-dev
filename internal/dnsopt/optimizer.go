@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -62,6 +63,12 @@ var publicResolvers = []dohEndpoint{
 	{name: "腾讯DNS", url: "https://doh.pub/dns-query?name=%s&type=A"},
 	{name: "360DNS", url: "https://doh.360.cn/resolve?name=%s&type=A"},
 	{name: "DNSPod", url: "https://1.12.12.12/dns-query?name=%s&type=A"},
+	// 2026-10-31：补海外解析源。国内三家对 github.com 只回一个 CN 入口，
+	// 该入口抖动时无备选；海外源能给出美区边缘节点（140.82.x / 20.27.x）。
+	// 它们本身也可能不可达，失败只影响候选数量，不影响主流程。
+	{name: "Cloudflare", url: "https://cloudflare-dns.com/dns-query?name=%s&type=A"},
+	{name: "GoogleDNS", url: "https://dns.google/resolve?name=%s&type=A"},
+	{name: "Quad9", url: "https://dns.quad9.net:5053/dns-query?name=%s&type=A"},
 }
 
 // Optimizer 负责候选 IP 的收集与测速。
@@ -103,38 +110,37 @@ func NewOptimizer(logf func(level, format string, args ...any)) *Optimizer {
 // 多源收集的意义在于：若某个 DNS 被污染，其他源仍可能给出真实 IP，
 // 后续测速阶段会自动淘汰不可用的污染 IP。
 func (o *Optimizer) Collect(ctx context.Context, host string) []string {
-	type res struct {
-		source string
-		ips    []string
-	}
-	ch := make(chan res, len(publicResolvers))
+	results := make([][]string, len(publicResolvers))
 
 	var wg sync.WaitGroup
-	for _, ep := range publicResolvers {
+	for i, ep := range publicResolvers {
 		wg.Add(1)
-		go func(ep dohEndpoint) {
+		go func(i int, ep dohEndpoint) {
 			defer wg.Done()
-			ips := o.queryDoH(ctx, ep, host)
-			ch <- res{source: ep.name, ips: ips}
-		}(ep)
+			results[i] = o.queryDoH(ctx, ep, host)
+		}(i, ep)
 	}
 	wg.Wait()
-	close(ch)
 
-	seen := make(map[string]string)
-	for r := range ch {
-		for _, ip := range r.ips {
-			if _, ok := seen[ip]; !ok {
-				seen[ip] = r.source
-			}
+	seen := make(map[string]bool)
+	out := make([]string, 0, 12)
+	add := func(ip string) {
+		if ip == "" || seen[ip] {
+			return
 		}
-	}
-
-	out := make([]string, 0, len(seen))
-	for ip := range seen {
+		seen[ip] = true
 		out = append(out, ip)
 	}
-	sort.Strings(out)
+	// 先国内源、再海外源，顺序稳定（便于日志核对来源顺序）。
+	for _, ips := range results {
+		for _, ip := range ips {
+			add(ip)
+		}
+	}
+	// 最后补内置候选：国内 DoH 只回一个死 IP 时，这是唯一的备选来源。
+	for _, ip := range config.BuiltinCandidateIPs(host) {
+		add(ip)
+	}
 	return out
 }
 
@@ -230,6 +236,54 @@ func (o *Optimizer) Probe(ctx context.Context, host, ip string, source string, p
 	return c
 }
 
+// HTTPCheck 对指定 IP 做一次真实 HTTP 校验（GET 目标路径，只读前 4KB）。
+//
+// 为什么需要它：Probe 只做 TCP + TLS 握手，而 2026-10-31 实测的
+// 20.205.243.166 属于「握手 236ms 通过、HTTP 全部超时」的抖动节点——
+// 只按握手写 hosts 会把整机 github.com 打进黑洞。写盘前对候选做一次
+// HTTP 校验，能把这个坑挡在 hosts 之外。
+//
+// 返回 true 表示拿到 <400 的响应头。重定向（302→S3）不算失败。
+func (o *Optimizer) HTTPCheck(ctx context.Context, host, ip, path string, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	if path == "" {
+		path = "/favicon.ico"
+	}
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 5 * time.Second}
+	tr := &http.Transport{
+		Proxy: nil,
+		DialContext: func(c context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(c, network, net.JoinHostPort(ip, "443"))
+		},
+		TLSHandshakeTimeout: timeout,
+		ForceAttemptHTTP2:   true,
+	}
+	defer tr.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+		// 302（user-attachments → S3 签名地址）是正常业务，不跟随也不判失败。
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "https://"+host+path, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "ghpp-httpcheck/1.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+	return resp.StatusCode < 400
+}
+
 // shortError 精简错误信息，避免日志被冗长的网络错误淹没。
 func shortError(err error) string {
 	if err == nil {
@@ -263,8 +317,12 @@ func (o *Optimizer) Optimize(ctx context.Context, target config.ProbeTarget, lim
 	}
 
 	if limit > 0 && len(ips) > limit {
-		// 候选过多时先做简单截断，避免测速耗时失控。
-		ips = ips[:limit]
+		// 候选上限至少 10 个：内置候选追加在末尾，若按默认 6 截断，
+		// 兜底 IP 会被整批丢掉（2026-10-31「只剩一个国内 IP」的成因）。
+		limit = 10
+		if len(ips) > limit {
+			ips = ips[:limit]
+		}
 	}
 
 	candidates := make([]Candidate, len(ips))

@@ -148,7 +148,6 @@ func TestAppCATrustCache(t *testing.T) {
 	}
 }
 
-
 // TestEnsureSystemCA 验证安装/升级回调的补装逻辑：系统代理开启但系统信任
 // 里的 CA 被卸载流程清掉时，EnsureSystemCA 应补装；系统代理未开启则跳过。
 func TestEnsureSystemCA(t *testing.T) {

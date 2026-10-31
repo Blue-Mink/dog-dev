@@ -10,20 +10,20 @@ import (
 
 // newMooURLs 是修订 2 合并进来的前缀源 URL（去尾斜杠）。
 var newMooURLs = map[string]bool{
-	"https://gh-proxy.org":                            true,
-	"https://hk.gh-proxy.org":                         true,
-	"https://cdn.gh-proxy.org":                        true,
-	"https://ghproxy.cxkpro.top":                      true,
-	"https://git.yylx.win":                            true,
-	"https://gitproxy.mrhjx.cn":                       true,
-	"https://gh.felicity.ac.cn":                       true,
-	"https://wget.la":                                 true,
-	"https://github.dpik.top":                         true,
-	"https://cors.isteed.cc":                          true,
-	"https://gh.dpik.top":                             true,
-	"https://github-proxy.memory-echoes.cn":           true,
-	"https://hub.conversun.com":                       true,
-	"https://gh.ddlc.top":                             true,
+	"https://gh-proxy.org":                  true,
+	"https://hk.gh-proxy.org":               true,
+	"https://cdn.gh-proxy.org":              true,
+	"https://ghproxy.cxkpro.top":            true,
+	"https://git.yylx.win":                  true,
+	"https://gitproxy.mrhjx.cn":             true,
+	"https://gh.felicity.ac.cn":             true,
+	"https://wget.la":                       true,
+	"https://github.dpik.top":               true,
+	"https://cors.isteed.cc":                true,
+	"https://gh.dpik.top":                   true,
+	"https://github-proxy.memory-echoes.cn": true,
+	"https://hub.conversun.com":             true,
+	"https://gh.ddlc.top":                   true,
 }
 
 // legacyMirrors 模拟修订 2 之前的出厂清单（当前清单减去新增项）。

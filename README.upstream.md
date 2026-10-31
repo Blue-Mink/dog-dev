@@ -46,17 +46,17 @@ https://github.com/MisiteQ/FnDepot
 
 ## 🚀 使用
 
-把下面的 `192.168.31.205` 换成你 NAS 的 IP：
+把下面的 `192.0.2.10` 换成你 NAS 的 IP：
 
 ```bash
 # git clone
-git clone http://192.168.31.205:7710/https://github.com/git/git.git
+git clone http://192.0.2.10:7710/https://github.com/git/git.git
 
 # Release 文件
-curl -LO "http://192.168.31.205:7710/https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
+curl -LO "http://192.0.2.10:7710/https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64"
 
 # raw 文件
-curl -LO "http://192.168.31.205:7710/https://raw.githubusercontent.com/git/git/master/README.md"
+curl -LO "http://192.0.2.10:7710/https://raw.githubusercontent.com/git/git/master/README.md"
 ```
 
 浏览器加速：控制台里开 hosts 模式全局生效，无需装证书；想更彻底可开 MITM 模式（需装一次根证书）。

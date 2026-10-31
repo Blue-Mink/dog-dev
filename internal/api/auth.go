@@ -39,8 +39,8 @@ type Auth struct {
 	sessions map[string]session
 
 	// 登录失败节流，防止暴力破解。
-	fails    map[string]*failRecord
-	failsMu  sync.Mutex
+	fails   map[string]*failRecord
+	failsMu sync.Mutex
 }
 
 // failRecord 记录某个来源的登录失败情况。

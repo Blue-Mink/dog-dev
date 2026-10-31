@@ -234,7 +234,7 @@ const kspeederAppDownloadURL = "https://github.com/Blue-Mink/FnDepot/releases/do
 // 配置文件里命中这些值说明用户从未自定义过，升级时直接跟进到最新发布版；
 // 其它（用户自己填的）地址一律不动。
 var legacyKSpeederDownloadURLs = map[string]bool{
-	"https://github.com/Blue-Mink/FnDepot/releases/download/v0.8.0/kspeeder-0.8.0-fnos-amd64.fpk": true,
+	"https://github.com/Blue-Mink/FnDepot/releases/download/v0.8.0/kspeeder-0.8.0-fnos-amd64.fpk":   true,
 	"https://github.com/Blue-Mink/FnDepot/releases/download/v0.7.17/kspeeder-0.7.17-fnos-amd64.fpk": true,
 }
 

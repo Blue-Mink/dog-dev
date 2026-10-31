@@ -17,7 +17,8 @@ import (
 //   - 4：合入用户提供的 25 个社区前缀源
 //   - 5：新增路径抓取型源类型（xget 形态）并合入 xget.xi-xu.me
 //   - 6：按两轮真实请求实测剔除长期不可用的出厂源（38 个），只留能用的
-const BuiltinRevision = 6
+//   - 7：从 Moo / FnDepot 下发清单补入实测可用的 github.tbap.top 与 fndepot1（仅 HTTP）
+const BuiltinRevision = 7
 
 // BuiltinMirrors 返回出厂内置的 GitHub 加速源列表。
 //
@@ -27,7 +28,7 @@ const BuiltinRevision = 6
 // BuiltinMirrors 返回出厂内置的 GitHub 加速源列表。
 //
 // 1.3.0 起这份清单只保留「实测可用」的源：
-//   - 2026-10-19 在本机（192.168.1.2）对 64 个出厂源各做两轮真实请求
+//   - 2026-10-19 在本机对 64 个出厂源各做两轮真实请求
 //     （raw.githubusercontent.com 的 gitignore 文件 / git 仓库 info/refs），
 //     两轮都失败且非偶发抖动的源全部下线（见 retiredBuiltinMirrorIDs）；
 //   - 保留的源都在两轮中返回 200（g.blfrp.cn / ghproxy.vip 各有一轮抖动，
@@ -61,6 +62,13 @@ func BuiltinMirrors() []Mirror {
 		{ID: "hub-glowp", Name: "hub.glowp.xyz", URL: "https://hub.glowp.xyz/", Kind: KindPrefix, Enabled: true, Weight: 0.7, Note: "社区公益中转"},
 		{ID: "gh-catmak", Name: "gh.catmak.name", URL: "https://gh.catmak.name/", Kind: KindPrefix, Enabled: true, Weight: 0.7, Note: "社区公益中转"},
 		{ID: "g-blfrp", Name: "g.blfrp.cn", URL: "https://g.blfrp.cn/", Kind: KindPrefix, Enabled: true, Weight: 0.7, Note: "社区公益中转"},
+
+		// ---- 2026-10-31 补源：Moo 加速源清单 + FnDepot 下发清单里 dog-dev 没有的，逐个实测 ----
+		// 复测口径与生产一致：前缀 + 完整目标 URL，raw / release 1MB / release 4MB，
+		// 顺序 + 并发两轮、严格 TLS。9 个 Moo 独有源里只有 tbap 可用（其余 429/000），
+		// FnDepot 下发的 fndepot1 仅 HTTP 可用（HTTPS 证书 CN 不匹配，Go x509 直接拒绝）。
+		{ID: "gh-tbap", Name: "github.tbap.top", URL: "https://github.tbap.top/", Kind: KindPrefix, Enabled: true, Weight: 0.7, Note: "社区加速，实测 1MB 352KB/s、4MB 1242KB/s，偶有抖动"},
+		{ID: "fndepot1", Name: "fndepot1.36337681.xyz", URL: "http://fndepot1.36337681.xyz/", Kind: KindPrefix, Enabled: true, Weight: 0.8, Note: "FnDepot 加速，仅 HTTP 可用（HTTPS 证书不匹配），明文传输"},
 
 		// ---- 路径抓取型源（xget 形态，仅 raw 文件）----
 		{ID: "xget-xi-xu", Name: "xget.xi-xu.me", URL: "https://xget.xi-xu.me/gh", Kind: KindPathFetch, Enabled: true, Weight: 0.7, Note: "路径抓取型中转，仅处理 raw 文件"},
@@ -245,6 +253,36 @@ func DomainProbeTargets() []ProbeTarget {
 		{Host: "codeload.github.com", Path: "/github/gitignore/tar.gz/refs/heads/main", Category: CatRaw},
 		{Host: "objects.githubusercontent.com", Path: "/", Category: CatRaw},
 	}
+}
+
+// builtinCandidateIPs 是各受管域名的内置候选 IP 兜底。
+//
+// 背景（2026-10-31 实锤）：国内公共 DoH（阿里/腾讯/360/DNSPod）对
+// github.com 只返回 20.205.243.166 这一个入口；该 IP 一旦抖动/被阻断，
+// 候选池就只剩一个死 IP——优选必然失败，hosts 却仍被写入，整机黑洞。
+// 这里补上 GitHub 官方常用的其它边缘节点（美区等），让优选至少有备选，
+// 是否可用仍由 TCP+TLS 探测与写盘前的 HTTP 校验决定。
+var builtinCandidateIPs = map[string][]string{
+	"github.com": {
+		"20.205.243.166", "20.27.177.113", "140.82.113.4", "140.82.112.3", "20.200.245.247",
+	},
+	"api.github.com": {
+		"20.205.243.168", "20.200.245.245", "140.82.113.6",
+	},
+	"codeload.github.com": {
+		"20.205.243.165", "20.200.245.246", "140.82.113.9",
+	},
+	"raw.githubusercontent.com": {
+		"185.199.108.133", "185.199.109.133", "185.199.110.133", "185.199.111.133",
+	},
+	"objects.githubusercontent.com": {
+		"185.199.110.133", "185.199.111.133",
+	},
+}
+
+// BuiltinCandidateIPs 返回某域名的内置候选 IP（无则返回 nil）。
+func BuiltinCandidateIPs(host string) []string {
+	return builtinCandidateIPs[strings.ToLower(host)]
 }
 
 // ProbeTarget 描述一次测速探测的目标。

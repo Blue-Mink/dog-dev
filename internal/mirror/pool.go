@@ -51,16 +51,16 @@ type Result struct {
 
 // stat 保存单个源的运行期统计与得分。
 type stat struct {
-	id       string
-	score    float64   // 综合得分，0 表示尚无有效数据
-	latency  float64   // 平滑后的延迟毫秒
-	through  float64   // 平滑后的吞吐 KB/s
-	okCount  int64     // 累计成功次数
-	badCount int64     // 累计失败次数
-	failStreak int     // 当前连续失败次数
-	cooldown time.Time // 冷却截止时刻
-	updated  time.Time
-	lastErr  string
+	id         string
+	score      float64   // 综合得分，0 表示尚无有效数据
+	latency    float64   // 平滑后的延迟毫秒
+	through    float64   // 平滑后的吞吐 KB/s
+	okCount    int64     // 累计成功次数
+	badCount   int64     // 累计失败次数
+	failStreak int       // 当前连续失败次数
+	cooldown   time.Time // 冷却截止时刻
+	updated    time.Time
+	lastErr    string
 }
 
 // ProbeFunc 抽象一次真实的网络探测，便于测试时替换为假实现。
@@ -68,11 +68,11 @@ type ProbeFunc func(ctx context.Context, m config.Mirror, target config.ProbeTar
 
 // Pool 是镜像源池，负责测速与择优。
 type Pool struct {
-	mu       sync.RWMutex
-	stats    map[string]*stat
-	results  map[string]Result
-	probe    ProbeFunc
-	client   *http.Client
+	mu         sync.RWMutex
+	stats      map[string]*stat
+	results    map[string]Result
+	probe      ProbeFunc
+	client     *http.Client
 	fastClient *http.Client
 
 	// 最近一次全量测速的完成时间。
@@ -665,7 +665,7 @@ func (p *Pool) Stats() map[string]Result {
 	for id, st := range p.stats {
 		cooling := time.Now().Before(st.cooldown)
 		r := Result{
-			MirrorID:       id,
+			MirrorID: id,
 			// 冷却期视为不可用：即便历史得分尚存，调度器此刻也不会选它。
 			OK:             st.score > 0 && !cooling,
 			LatencyMS:      int64(st.latency),

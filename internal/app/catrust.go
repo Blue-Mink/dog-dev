@@ -31,9 +31,9 @@ import (
 
 // 系统信任相关路径与命令。包级变量便于单测指向临时目录与假命令。
 var (
-	systemCADir     = "/usr/local/share/ca-certificates"
-	systemCAFile    = "/usr/local/share/ca-certificates/ghpp-ca.crt"
-	systemCABundle  = "/etc/ssl/certs/ca-certificates.crt"
+	systemCADir      = "/usr/local/share/ca-certificates"
+	systemCAFile     = "/usr/local/share/ca-certificates/ghpp-ca.crt"
+	systemCABundle   = "/etc/ssl/certs/ca-certificates.crt"
 	updateCACertsExe = "update-ca-certificates"
 )
 
