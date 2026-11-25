@@ -142,7 +142,7 @@ type ServerConfig struct {
 	// Username 是控制台登录用户名。
 	Username string `yaml:"username" json:"username"`
 	// Password 是控制台登录密码，默认 admin123，登录后可在控制台修改。
-	Password string `yaml:"password" json:"password"`
+	Password string `yaml:"password" json:"-"`
 	// SessionTTLHours 是登录会话有效期小时数。
 	SessionTTLHours int `yaml:"session_ttl_hours" json:"session_ttl_hours"`
 	// AuthEnabled 控制控制台是否要求登录。

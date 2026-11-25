@@ -210,7 +210,7 @@ async function ksService(action) {
 function applyDocker() {
   dialog.warning({
     title: '一键应用到系统',
-    content: '将写入 /etc/docker/daemon.json（保留其他配置）并重启 Docker，运行中的容器会中断几秒。',
+    content: '将自动识别系统 Docker 配置（飞牛走 dockermgr，其他系统合并写入 daemon.json 且保留原有镜像源）并重启 Docker，运行中的容器会中断几秒。',
     positiveText: '应用',
     negativeText: '取消',
     onPositiveClick: async () => {

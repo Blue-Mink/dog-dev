@@ -83,6 +83,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/sysproxy", s.guard(s.handleSysProxy))
 	mux.HandleFunc("/api/about", s.guard(s.handleAbout))
 
+	// 未匹配的 /api/ 路径返回 JSON 404，避免落到前端兜底返回 200 + index.html。
+	mux.HandleFunc("/api/", s.handleAPINotFound)
+
 	// ---- 静态资源：未匹配的路径交给前端 ----
 	mux.Handle("/", s.assets)
 
@@ -203,6 +206,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"verdict": verdict,
 		"version": Version,
 	})
+}
+
+// handleAPINotFound 为未注册的 /api/ 路径返回 JSON 404。
+func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, "接口不存在：%s %s", r.Method, r.URL.Path)
 }
 
 // handleConfig 读取或更新完整配置。
