@@ -2,7 +2,7 @@
 /* 总览 v2：指标×6 / 加速模式 / 请求分布 / 接入方式（折叠）— 移动端优先，文案精简 */
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useMessage, useDialog } from 'naive-ui'
-import { api, fmtBytes, fmtDuration } from '../api'
+import { api, fmtBytes, fmtDuration, fmtTime, fmtMs } from '../api'
 import StatCard from '../components/StatCard.vue'
 import Fold from '../components/Fold.vue'
 import Sheet from '../components/Sheet.vue'
