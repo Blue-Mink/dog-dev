@@ -23,6 +23,7 @@ import (
 	"github.com/ghpp/ghpp/internal/mirror"
 	"github.com/ghpp/ghpp/internal/netutil"
 	"github.com/ghpp/ghpp/internal/proxy"
+	"github.com/ghpp/ghpp/internal/trace"
 )
 
 // App 是应用的总控制器。
@@ -35,6 +36,8 @@ import (
 type App struct {
 	cfg *config.Config
 	log *logbus.Bus
+	// tracer 记录请求/换源/流量三类结构化明细（内存环+JSONL 落盘）。
+	tracer *trace.Recorder
 
 	pool     *mirror.Pool
 	engine   *proxy.Engine
@@ -101,11 +104,17 @@ func New(cfg *config.Config, log *logbus.Bus) *App {
 		log.Logf("warn", "根证书初始化失败，HTTPS 中间人加速不可用: %v", caErr)
 	}
 
+	// 结构化明细记录器：落盘到 DataDir/trace.jsonl（1MB 轮转，留 3 份），
+	// 内存保留最近 2000 条供 API 查询。创建失败不阻断启动。
+	tracePath := filepath.Join(cfg.DataDir, "trace.jsonl")
+	tracer := trace.New(tracePath, 2000, 1<<20, 3)
+
 	// kspeeder 依赖应用探测器：检测独立安装的 kspeeder 应用是否
 	// 安装/运行，其 registry 端口活着时作为 Docker 上游第一优先。
 	a := &App{
 		cfg:       cfg,
 		log:       log,
+		tracer:    tracer,
 		hostsFail: make(map[string]int, 8),
 		pool:      pool,
 		ca:        ca,
@@ -115,10 +124,11 @@ func New(cfg *config.Config, log *logbus.Bus) *App {
 
 	// 日志总线同时作为各模块的日志出口。
 	a.engine = proxy.NewEngine(proxy.Options{
-		Config: func() *config.Config { return a.CurrentConfig() },
-		Pool:   pool,
-		Logf:   log.Logf,
-		CA:     ca,
+		Config:   func() *config.Config { return a.CurrentConfig() },
+		Pool:     pool,
+		Logf:     log.Logf,
+		Recorder: tracer,
+		CA:       ca,
 		// kspeeder 应用运行时，其 registry 作为 Docker 上游的第一优先。
 		DockerExtraUpstream: a.KSpeederURL,
 		// CONNECT 分流用：系统代理场景下 CA 未入系统信任时降级纯隧道。
@@ -249,6 +259,9 @@ func (a *App) CurrentConfig() *config.Config {
 
 // Config 返回底层配置对象，供 API 层执行写操作。
 func (a *App) Config() *config.Config { return a.cfg }
+
+// Tracer 返回结构化明细记录器。
+func (a *App) Tracer() *trace.Recorder { return a.tracer }
 
 // Log 返回日志总线。
 func (a *App) Log() *logbus.Bus { return a.log }
@@ -469,6 +482,9 @@ func (a *App) Stop(ctx context.Context) error {
 
 	// 停代理（1.2.0 起本应用不再有自托管引擎需要停止）。
 	err := a.engine.Stop(ctx)
+	if a.tracer != nil {
+		_ = a.tracer.Close()
+	}
 	a.log.Logf("info", "Dog-dev 已停止")
 	return err
 }

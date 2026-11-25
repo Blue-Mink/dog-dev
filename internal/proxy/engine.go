@@ -29,6 +29,7 @@ import (
 
 	"github.com/ghpp/ghpp/internal/config"
 	"github.com/ghpp/ghpp/internal/mirror"
+	"github.com/ghpp/ghpp/internal/trace"
 )
 
 // Metrics 汇总代理服务的运行指标。
@@ -92,6 +93,9 @@ type Engine struct {
 	dockerRedirectAllow *redirectAllowSet
 
 	metrics Metrics
+
+	// rec 记录结构化明细（请求/换源/流量），由 Options.Recorder 注入。
+	rec *trace.Recorder
 
 	// logf 用于输出结构化日志，由上层注入。
 	logf func(level, format string, args ...any)
@@ -222,6 +226,8 @@ type Options struct {
 	// 仅系统代理场景的 CONNECT 分流用到（见 mitmAllowed）；
 	// nil 视为信任（保持旧行为）。
 	CAInSystemTrust func() bool
+	// Recorder 记录请求/换源/流量三类结构化明细，nil 表示不记录。
+	Recorder *trace.Recorder
 }
 
 // NewEngine 创建反向代理引擎。
@@ -303,6 +309,7 @@ func NewEngine(opt Options) *Engine {
 		dockerRedirectAllow: newRedirectAllowSet(),
 		dockerExtra:         opt.DockerExtraUpstream,
 		logf:                opt.Logf,
+		rec:                 opt.Recorder,
 		sem:                 make(chan struct{}, opt.MaxFlight),
 		directCB:            make(map[string]*directBreaker),
 		caSystemTrusted:     opt.CAInSystemTrust,
@@ -557,6 +564,29 @@ func (e *Engine) resetDirectBreakers() {
 
 // Metrics 返回指标引用，供 API 层读取。
 func (e *Engine) Metrics() *Metrics { return &e.metrics }
+
+// traceEvent 追加一条结构化明细；Recorder 未注入时是空操作。
+func (e *Engine) traceEvent(ev trace.Event) {
+	if e.rec == nil {
+		return
+	}
+	e.rec.Add(ev)
+}
+
+// shortReason 把错误文本压成不含 URL 查询串的短原因，避免明细泄露路径或参数。
+func shortReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 80 {
+		s = s[:80]
+	}
+	return s
+}
 
 // Start 在指定地址启动代理监听。
 func (e *Engine) Start(addr string) error {
@@ -883,11 +913,23 @@ func stripPort(h string) string {
 
 // serveAccelerated 执行带加速通道的转发。
 func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *config.Config, t *target) {
+	serveStart := time.Now()
 	e.bumpCategory(t.category)
+	logged := false
+	defer func() {
+		if !logged {
+			e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+				Channel: "pass", MS: time.Since(serveStart).Milliseconds()})
+		}
+	}()
+	mark := func() { logged = true }
 
 	mirrors := cfg.EnabledMirrors()
 	if len(mirrors) == 0 {
 		e.forwardDirect(w, r, cfg)
+		mark()
+		e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+			Channel: "direct", MS: time.Since(serveStart).Milliseconds()})
 		return
 	}
 
@@ -913,6 +955,9 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 			if done, healthy, err := e.tryDirect(w, r, cfg, t); done {
 				// 慢成功也会被记为不健康，立即熔断保护后续请求。
 				e.recordDirect(t.host, healthy)
+				mark()
+				e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+					Channel: "direct", MS: time.Since(serveStart).Milliseconds()})
 				return
 			} else {
 				e.recordDirect(t.host, false)
@@ -942,6 +987,7 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 	// 最多尝试 3 个源，逐个降级。
 	const maxAttempts = 3
 	var lastErr error
+	var prevSource string
 	var allSkipped bool
 	// lastHeld 保存"上游已返回但未提交给客户端"的可重试 4xx 响应：
 	// 若后续源全部同样失败，透传最后一次的业务响应（保留 403/400 语义），
@@ -956,6 +1002,9 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 			if attempt == 0 {
 				e.logf("warn", "全部加速源处于冷却状态，本次直连 %s", t.host)
 				e.forwardDirect(w, r, cfg)
+				mark()
+				e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+					Channel: "direct", Reason: "全部源冷却", MS: time.Since(serveStart).Milliseconds()})
 				return
 			}
 			break
@@ -979,11 +1028,18 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 		// 而不是等第二次也失败才补记。
 		if attempt > 0 {
 			e.metrics.Failovers.Add(1)
+			e.traceEvent(trace.Event{Kind: trace.KindFailover, Host: t.host, Category: t.category,
+				From: prevSource, To: m.Name, Reason: shortReason(lastErr),
+				MS: time.Since(serveStart).Milliseconds()})
 		}
 
 		if done {
+			mark()
+			e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+				Channel: "mirror", Source: m.Name, MS: time.Since(serveStart).Milliseconds()})
 			return
 		}
+		prevSource = m.Name
 		if held != nil {
 			if lastHeld != nil {
 				lastHeld.Body.Close()
@@ -1011,6 +1067,10 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 			return
 		}
 		e.commitHeld(w, t, lastHeld)
+		mark()
+		e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+			Channel: "mirror", Reason: "业务错误透传", Status: lastHeld.StatusCode,
+			MS: time.Since(serveStart).Milliseconds()})
 		return
 	}
 	// 所有源都是"不适用而跳过"（目标在该源形态覆盖之外）：
@@ -1018,10 +1078,17 @@ func (e *Engine) serveAccelerated(w http.ResponseWriter, r *http.Request, cfg *c
 	if lastErr == nil && allSkipped {
 		e.logf("warn", "没有能处理 %s 的加速源，回退直连", t.host)
 		e.forwardDirect(w, r, cfg)
+		mark()
+		e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+			Channel: "direct", Reason: "源形态不匹配", MS: time.Since(serveStart).Milliseconds()})
 		return
 	}
 
 	e.metrics.Failed.Add(1)
+	mark()
+	e.traceEvent(trace.Event{Kind: trace.KindRequest, Host: t.host, Category: t.category,
+		Channel: "fail", Reason: shortReason(lastErr), Status: http.StatusBadGateway,
+		MS: time.Since(serveStart).Milliseconds()})
 	if lastErr == nil {
 		lastErr = errors.New("没有可用的加速源")
 	}
@@ -1120,6 +1187,8 @@ func (e *Engine) tryDirect(w http.ResponseWriter, r *http.Request, cfg *config.C
 	n, copyErr := io.Copy(w, io.MultiReader(bytes.NewReader(probe), resp.Body))
 	e.metrics.BytesOut.Add(n)
 	e.metrics.Accelerated.Add(1)
+	e.traceEvent(trace.Event{Kind: trace.KindTransfer, Host: t.host, Category: t.category,
+		Channel: "direct", Bytes: n, MS: time.Since(start).Milliseconds()})
 
 	latency := time.Since(start)
 	if copyErr == nil || isClientGone(copyErr) {
@@ -1261,6 +1330,8 @@ func (e *Engine) tryMirror(w http.ResponseWriter, r *http.Request, cfg *config.C
 
 	e.metrics.BytesOut.Add(n)
 	e.metrics.Accelerated.Add(1)
+	e.traceEvent(trace.Event{Kind: trace.KindTransfer, Host: t.host, Category: t.category,
+		Channel: "mirror", Source: m.Name, Bytes: n, MS: latency.Milliseconds()})
 	// 估算节省耗时：假设直连首包需要 1.2 秒，加速后为实测延迟。
 	saved := 1200 - latency.Milliseconds()
 	if saved > 0 {

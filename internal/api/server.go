@@ -63,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/hosts", s.guard(s.handleHosts))
 	mux.HandleFunc("/api/dns", s.guard(s.handleDNS))
 	mux.HandleFunc("/api/logs", s.guard(s.handleLogs))
+	mux.HandleFunc("/api/trace", s.guard(s.handleTrace))
 	mux.HandleFunc("/api/logs/stream", s.guard(s.handleLogStream))
 	mux.HandleFunc("/api/password", s.guard(s.handlePassword))
 	mux.HandleFunc("/api/service", s.guard(s.handleService))

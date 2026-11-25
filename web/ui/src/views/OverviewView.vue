@@ -36,12 +36,12 @@ const metrics = computed(() => {
   if (!m.value) return []
   const hit = m.value.total_requests > 0 ? Math.round(m.value.accelerated / m.value.total_requests * 100) : 0
   return [
-    { label: '累计请求', value: m.value.total_requests.toLocaleString(), sub: '加速 ' + m.value.accelerated.toLocaleString() + ' 次' },
-    { label: '加速命中率', value: hit + '%', sub: m.value.failed > 0 ? '失败 ' + m.value.failed + ' 次' : '无失败' },
-    { label: '流量转发', value: fmtBytes(m.value.bytes_out), sub: '节省约 ' + fmtDuration(m.value.saved_ms / 1000) },
-    { label: '可用加速源', value: s.value.mirrors.healthy + ' / ' + s.value.mirrors.enabled, sub: '共 ' + s.value.mirrors.total + ' 个' },
-    { label: '运行时长', value: s.value.uptime || '—', sub: '代理 :' + proxyPortText.value },
-    { label: '换源次数', value: String(m.value.failovers), sub: '自动故障转移' },
+    { key: 'request', label: '累计请求', value: m.value.total_requests.toLocaleString(), sub: '加速 ' + m.value.accelerated.toLocaleString() + ' 次 · 点开看明细' },
+    { key: 'hit', label: '加速命中率', value: hit + '%', sub: m.value.failed > 0 ? '失败 ' + m.value.failed + ' 次' : '无失败' },
+    { key: 'transfer', label: '流量转发', value: fmtBytes(m.value.bytes_out), sub: '节省约 ' + fmtDuration(m.value.saved_ms / 1000) + ' · 点开看明细' },
+    { key: 'sources', label: '可用加速源', value: s.value.mirrors.healthy + ' / ' + s.value.mirrors.enabled, sub: '共 ' + s.value.mirrors.total + ' 个' },
+    { key: 'uptime', label: '运行时长', value: s.value.uptime || '—', sub: '代理 :' + proxyPortText.value },
+    { key: 'failover', label: '换源次数', value: String(m.value.failovers), sub: '自动故障转移 · 点开看明细' },
   ]
 })
 
@@ -54,6 +54,35 @@ const cats = computed(() => {
     pct: total > 0 ? Math.round(data[i] / total * 100) : 0, n: data[i],
   }))
 })
+
+/* ---- 三张卡片的明细弹层（request / failover / transfer） ----
+ * 数据源 /api/trace，结构化事件落盘持久化（重启仍可查）。
+ * 只展示域名，不展示路径/查询串/凭据。 */
+const DETAIL_KEYS = ['request', 'failover', 'transfer']
+const detail = ref({ key: '', title: '', loading: false, events: [] })
+const DETAIL_TITLES = { request: '累计请求明细', failover: '换源记录', transfer: '流量转发明细' }
+const CHANNEL_NAMES = { direct: '直连', mirror: '镜像源', docker: 'Docker', pass: '其他', fail: '失败' }
+const CATEGORY_NAMES = { web: '网页/API', raw: '文件下载', clone: '仓库克隆', docker: 'Docker' }
+
+async function openDetail(key) {
+  if (!DETAIL_KEYS.includes(key)) return
+  detail.value = { key, title: DETAIL_TITLES[key], loading: true, events: [] }
+  try {
+    const evs = await api('/api/trace?type=' + key + '&limit=200')
+    detail.value.events = Array.isArray(evs) ? evs : []
+  } catch { detail.value.events = [] }
+  detail.value.loading = false
+}
+function fmtEventTime(t) { return fmtTime(t) }
+function evSubtitle(e) {
+  if (detail.value.key === 'failover') {
+    return (e.from || '—') + ' → ' + (e.to || '—') + (e.reason ? ' · ' + e.reason : '')
+  }
+  if (detail.value.key === 'transfer') {
+    return (e.source ? e.source + ' · ' : '') + fmtBytes(e.bytes) + (e.ms ? ' · ' + fmtMs(e.ms) : '')
+  }
+  return (CHANNEL_NAMES[e.channel] || e.channel || '—') + (e.source ? ' · ' + e.source : '') + (e.reason ? ' · ' + e.reason : '') + (e.ms ? ' · ' + fmtMs(e.ms) : '')
+}
 
 async function setMode(mode) {
   try {
@@ -138,7 +167,7 @@ async function saveExternal() {
 <template>
   <div v-if="s && m">
     <div class="metrics">
-      <StatCard v-for="x in metrics" :key="x.label" v-bind="x" />
+      <StatCard v-for="x in metrics" :key="x.label" v-bind="x" :clickable="DETAIL_KEYS.includes(x.key)" @click="openDetail(x.key)" />
     </div>
 
     <section class="card">
@@ -207,6 +236,22 @@ async function saveExternal() {
         </div>
       </Sheet>
     </section>
+
+    <!-- 三张卡片的明细弹层：共享一个 Sheet，按当前 key 切换内容 -->
+    <Sheet :show="!!detail.key" :title="detail.title" @close="detail.key = ''">
+      <p class="dt-tip">只记录域名，不含具体路径与参数；明细已落盘，重启后仍可查。</p>
+      <p v-if="detail.loading" class="dt-empty">正在加载明细…</p>
+      <p v-else-if="!detail.events.length" class="dt-empty">暂无明细记录，产生流量后会自动出现在这里。</p>
+      <div v-else class="dt-list">
+        <div v-for="e in detail.events" :key="e.seq" class="dt-row">
+          <span class="dt-time">{{ fmtEventTime(e.time) }}</span>
+          <span class="dt-main">
+            <strong>{{ e.host || '—' }}</strong>
+            <small>{{ evSubtitle(e) }}<template v-if="e.category"> · {{ CATEGORY_NAMES[e.category] || e.category }}</template></small>
+          </span>
+        </div>
+      </div>
+    </Sheet>
   </div>
 
   <p v-else class="loading">正在加载…</p>
@@ -269,5 +314,14 @@ async function saveExternal() {
 .ci-body strong { font-size: 13px; }
 .ci-body code { font: 11px/1.5 ui-monospace, Menlo, monospace; color: var(--fg); background: var(--card2); border-radius: 6px; padding: 4px 8px; word-break: break-all; }
 .ci-body small { font-size: 11px; color: var(--fg3); }
+.dt-tip { margin: 2px 0 10px; font-size: 11px; color: var(--fg3); line-height: 1.5; }
+.dt-empty { text-align: center; color: var(--fg2); font-size: 12px; padding: 26px 0; }
+.dt-list { display: flex; flex-direction: column; }
+.dt-row { display: flex; gap: 10px; padding: 9px 0; border-top: 0.5px solid var(--hairline); }
+.dt-row:first-child { border-top: 0; }
+.dt-time { flex: none; width: 92px; font: 10px/1.6 ui-monospace, Menlo, monospace; color: var(--fg3); }
+.dt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dt-main strong { font-size: 13px; color: var(--fg); word-break: break-all; }
+.dt-main small { font-size: 11px; color: var(--fg2); line-height: 1.5; word-break: break-all; }
 .loading { text-align: center; color: var(--fg2); padding: 40px 0; }
 </style>
