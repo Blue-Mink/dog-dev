@@ -74,14 +74,21 @@ async function openDetail(key) {
   detail.value.loading = false
 }
 function fmtEventTime(t) { return fmtTime(t) }
+// 历史记录里旧版 shortReason 会留下 `Get "https` 这类截断串；前端兜底归一，
+// 既不显示难读片段，也保证不把任何 URL 残留渲染出来。
+function cleanReason(r) {
+  if (!r) return ''
+  if (/https?|\/\/|Get|^\s*"/i.test(r)) return '连接失败'
+  return r
+}
 function evSubtitle(e) {
   if (detail.value.key === 'failover') {
-    return (e.from || '—') + ' → ' + (e.to || '—') + (e.reason ? ' · ' + e.reason : '')
+    return (e.from || '—') + ' → ' + (e.to || '—') + (e.reason ? ' · ' + cleanReason(e.reason) : '')
   }
   if (detail.value.key === 'transfer') {
     return (e.source ? e.source + ' · ' : '') + fmtBytes(e.bytes) + (e.ms ? ' · ' + fmtMs(e.ms) : '')
   }
-  return (CHANNEL_NAMES[e.channel] || e.channel || '—') + (e.source ? ' · ' + e.source : '') + (e.reason ? ' · ' + e.reason : '') + (e.ms ? ' · ' + fmtMs(e.ms) : '')
+  return (CHANNEL_NAMES[e.channel] || e.channel || '—') + (e.source ? ' · ' + e.source : '') + (e.reason ? ' · ' + cleanReason(e.reason) : '') + (e.ms ? ' · ' + fmtMs(e.ms) : '')
 }
 
 async function setMode(mode) {

@@ -573,19 +573,39 @@ func (e *Engine) traceEvent(ev trace.Event) {
 	e.rec.Add(ev)
 }
 
-// shortReason 把错误文本压成不含 URL 查询串的短原因，避免明细泄露路径或参数。
+// shortReason 把错误归类为固定短语，绝不返回原始错误文本（其中可能含 URL、路径、查询串或凭据）。
+// 旧实现在 "://" 处硬截断，"Get "https://x/y": timeout" 会变成 "Get "https" ——既难读又像泄露。
 func shortReason(err error) string {
 	if err == nil {
 		return ""
 	}
-	s := err.Error()
-	if i := strings.Index(s, "://"); i >= 0 {
-		s = s[:i]
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "deadline exceeded"), strings.Contains(s, "timeout"), strings.Contains(s, "timed out"):
+		return "请求超时"
+	case strings.Contains(s, "no such host"), strings.Contains(s, "lookup "), strings.Contains(s, "dns"):
+		return "域名解析失败"
+	case strings.Contains(s, "connection refused"), strings.Contains(s, "connect: refused"):
+		return "连接被拒"
+	case strings.Contains(s, "connection reset"), strings.Contains(s, "reset by peer"), strings.Contains(s, "broken pipe"):
+		return "连接中断"
+	case strings.Contains(s, "x509"), strings.Contains(s, "certificate"), strings.Contains(s, "tls handshake"), strings.Contains(s, "tls:"):
+		return "证书或握手失败"
+	case strings.Contains(s, "too many redirects"):
+		return "重定向过多"
+	case strings.Contains(s, "context canceled"), strings.Contains(s, "context cancelled"):
+		return "已取消"
+	case strings.Contains(s, "unexpected eof"), strings.Contains(s, "eof"):
+		return "响应中断"
 	}
-	if len(s) > 80 {
-		s = s[:80]
+	// HTTP 状态码：只取码，不带 URL。
+	if i := strings.Index(s, "status code "); i >= 0 {
+		tail := s[i+len("status code "):]
+		if len(tail) >= 3 && tail[0] >= '4' && tail[0] <= '5' {
+			return "HTTP " + tail[:3]
+		}
 	}
-	return s
+	return "连接失败"
 }
 
 // Start 在指定地址启动代理监听。
