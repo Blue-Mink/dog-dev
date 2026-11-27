@@ -238,6 +238,22 @@ var legacyKSpeederDownloadURLs = map[string]bool{
 	"https://github.com/Blue-Mink/FnDepot/releases/download/v0.7.17/kspeeder-0.7.17-fnos-amd64.fpk": true,
 }
 
+// IsDefaultKSpeederDownloadURL 报告 u 是否为应用内置的默认/历史下载地址。
+// 控制台据此区分「用户自定义地址」（原样使用）与「内置默认值」——
+// 后者会在请求时动态解析远端清单取最新版，不再写死版本。
+// KSpeederDefaultDownloadURL 返回应用内置的 kspeeder 下载地址（最后兜底）。
+func KSpeederDefaultDownloadURL() string { return kspeederAppDownloadURL }
+
+func IsDefaultKSpeederDownloadURL(u string) bool {
+	if u == kspeederAppDownloadURL || legacyKSpeederDownloadURLs[u] {
+		return true
+	}
+	// normalize 之前的老配置可能仍是任一 FnDepot 历史发布版本；
+	// 只要形如 FnDepot 的 kspeeder 发布包，就视为内置默认。
+	return strings.Contains(u, "/FnDepot/releases/download/") &&
+		strings.Contains(u, "kspeeder-") && strings.HasSuffix(u, ".fpk")
+}
+
 // KSpeederConfig 描述本机 kspeeder 依赖应用的接入点。
 //
 // 1.2.0 起本应用不再捆绑 iStoreEnhance 引擎：Docker 拉取加速依赖独立安装的

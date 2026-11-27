@@ -22,6 +22,11 @@ func (s *Server) handleKSpeeder(w http.ResponseWriter, r *http.Request) {
 
 	st := s.app.KSpeederStatus()
 
+	// 下载链接动态取自远端清单（与 moo 同源的 FnDepot fnpack.json），
+	// 不再写死版本；用户自定义地址仍优先。详见 kspeeder_download.go。
+	downloadURL, downloadVersion, downloadSHA256, downloadSize, downloadSource :=
+		resolveKSpeederDownload(s.app.CurrentConfig(), s.app.Log().Logf)
+
 	// kspeeder 应用运行时给出本机 Docker 接入地址，前端可直接展示复制。
 	var dock string
 	if st.Mode == km.ModeRunning {
@@ -35,7 +40,11 @@ func (s *Server) handleKSpeeder(w http.ResponseWriter, r *http.Request) {
 		"status":             st,
 		"docker":             map[string]any{"registry": dock},
 		"nodes":              []any{},
-		"download_url":       s.app.CurrentConfig().KSpeeder.DownloadURL,
+		"download_url":       downloadURL,
+		"download_version":   downloadVersion,
+		"download_sha256":    downloadSHA256,
+		"download_size":      downloadSize,
+		"download_source":    downloadSource,
 		"recommended_engine": km.RecommendedEngineMin,
 	}
 	if err != nil {
