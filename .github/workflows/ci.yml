@@ -1,0 +1,24 @@
+name: CI Gate
+
+on:
+  push:
+    branches: [borrow-upstream, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Run CI gate
+        run: python3 scripts/ci_gate.py --root . --skip-go
+      - name: Audit report
+        if: always()
+        run: python3 scripts/audit_repo.py --root . || true
