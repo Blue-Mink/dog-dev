@@ -520,7 +520,6 @@ func stringList(v any) []string {
 	return out
 }
 
-
 // restartDockerService 重启 Docker 服务，优先 systemctl，回退 service 命令。
 //
 // 返回错误表示重启失败（配置文件已写入，下次 Docker 重启仍会加载）。

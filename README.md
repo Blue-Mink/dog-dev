@@ -2,7 +2,7 @@
   <img src="fpk/ICON_256.PNG" width="96" alt="Dog-dev 加速器" /><br/>
   <b>Dog-dev 加速器</b><br/>
   让闲置的飞牛 NAS 当局域网 GitHub / Docker 加速跳板<br/><br/>
-  <img src="https://img.shields.io/badge/version-1.3.14-blue" alt="version"/>
+  <img src="https://img.shields.io/badge/version-1.3.16-blue" alt="version"/>
   <img src="https://img.shields.io/badge/fnOS-x86__64%20%C2%B7%20arm64-6f42c1" alt="platform"/>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-111827" alt="license"/></a>
   <a href="https://github.com/MisiteQ/github-plus-plus"><img src="https://img.shields.io/badge/upstream-MisiteQ-00a58a" alt="upstream"/></a>
